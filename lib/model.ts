@@ -2,17 +2,29 @@
 //
 // The idea, in one paragraph. A protocol that has not launched a token is
 // worth roughly what the market already pays for similar protocols that
-// have. So for every category we take the protocols whose token trades,
-// compute each one's market-cap-to-TVL ratio, and use the category median
-// as the price of one dollar of TVL in that category. A pre-token
-// protocol's base value is its TVL times that median. Three small,
-// stated adjustments follow: seven-day TVL momentum (clamped, so one wild
-// week cannot dominate), maturity (a protocol that has run for years with
-// no token is a more credible launch candidate than a two-week-old one),
-// and breadth (more chains, a slightly wider launch audience). The board
-// ranks by the resulting implied value. A separate launch prior per
-// category and a confidence grade from the peer count are shown on the
-// dashboard as farming guidance; they never move the value ranking.
+// have. The catch is that the market does not pay a flat price per TVL
+// dollar: measured on the snapshot's traded protocols, market cap grows
+// like TVL to the power of about one half, so a flat multiple overprices
+// big protocols and underprices small ones. This model therefore fits
+// the curve ln(market cap) = a + b x ln(TVL) on the traded peers: one
+// shared slope, plus a level per category (three or more peers earn a
+// level, shrunk toward the global curve so small categories stay
+// honest), and prices a pre-token protocol off that curve. Three small, stated adjustments follow: seven-day TVL
+// momentum (clamped, so one wild week cannot dominate), maturity (a
+// protocol that has run for years with no token is a more credible
+// launch candidate than a two-week-old one), and breadth (more chains, a
+// slightly wider launch audience). The board ranks by the resulting
+// implied value. A separate launch prior per category and a confidence
+// grade from the peer count are shown on the dashboard as farming
+// guidance; they never move the value ranking.
+//
+// The model is not asserted, it is measured: a deterministic split-half
+// backtest (protocols assigned to train or test by a hash of their slug,
+// so anyone can reproduce the split) fits every candidate model on one
+// half of the traded protocols and scores it against the other half's
+// actual market caps. The dashboard publishes the result next to the
+// board: the fitted curve beats the flat category median this program
+// used before, and both beat a single global multiple.
 //
 // Nothing here knows a protocol's name. The same arithmetic scores every
 // row, and the dashboard recomputes each value from the same inputs so a
@@ -48,6 +60,41 @@ export interface PeerStats {
   high: number;
 }
 
+/**
+ * A fitted pricing curve for one peer set: ln(market cap) = intercept +
+ * slope x ln(TVL). The slope is shared (fit on all traded peers); each
+ * category with enough peers gets its own intercept — its level —
+ * shrunk toward the global intercept so a handful of peers cannot drag
+ * the level far. The residual quartiles price the honest range around a
+ * point estimate.
+ */
+export interface FitStats {
+  category: string;
+  peers: number;
+  intercept: number;
+  slope: number;
+  resid_low: number;
+  resid_high: number;
+}
+
+/** One candidate model scored on the held-out half of the traded protocols. */
+export interface ValidationModel {
+  name: string;
+  median_ape_pct: number;
+  within_2x_pct: number;
+  within_3x_pct: number;
+}
+
+/** The split-half backtest, computed by this program from the snapshot itself. */
+export interface ValidationReport {
+  method: string;
+  usable_peers: number;
+  train: number;
+  test: number;
+  global_slope: number;
+  models: ValidationModel[];
+}
+
 export interface BoardRow {
   rank: number;
   slug: string;
@@ -74,6 +121,10 @@ export interface BoardRow {
     peer_high: number;
     peers: number;
     peer_scope: 'category' | 'global';
+    fit_intercept: number;
+    fit_slope: number;
+    fit_scope: 'category' | 'global';
+    median_implied_usd: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -105,18 +156,26 @@ export interface RadarData {
   pre_token_size: number;
   live_size: number;
   categories: PeerStats[];
+  fits: FitStats[];
+  validation: ValidationReport;
   rows: BoardRow[];
   live: LiveRow[];
 }
 
-export const MODEL_VERSION = 'launch-radar-2';
+export const MODEL_VERSION = 'launch-radar-3';
 
 export const MODEL_SUMMARY =
-  'Implied value = TVL x category peer median (market cap / TVL of the protocols in the same ' +
-  'category whose token already trades), adjusted for 7-day TVL momentum (clamped to -50%..+100%, ' +
-  'weight 0.35), maturity (0.75x at listing rising to 1.20x after four tokenless years) and chain ' +
-  'breadth (+3% per extra chain, at most +15%). The range uses the peer interquartile multiples. ' +
-  'Launch prior and confidence are farming guidance only and never change the value rank. ' +
+  'Implied value comes from a curve fitted on the protocols whose token already trades: ' +
+  'ln(market cap) = a + b x ln(TVL), one shared slope with a level per category (three or more ' +
+  'traded peers earn a level, shrunk toward the global curve; otherwise the global curve ' +
+  'prices it). A flat multiple is not ' +
+  'used: on this snapshot market cap grows like TVL to about the power 0.5, so a flat price per ' +
+  'TVL dollar overprices large protocols. The fitted value is adjusted for 7-day TVL momentum ' +
+  '(clamped to -50%..+100%, weight 0.35), maturity (0.75x at listing rising to 1.20x after four ' +
+  'tokenless years) and chain breadth (+3% per extra chain, at most +15%). The range uses the ' +
+  'fit\u2019s residual quartiles. A deterministic split-half backtest, published on the dashboard, ' +
+  'scores this model against the flat multiples it replaced. Launch prior and confidence are ' +
+  'farming guidance only and never change the value rank. ' +
   'The board also leaves out wrapped, staked and bridged products of tokens that already trade: ' +
   'a wrapper with no ticker of its own is not a launch that has not happened yet.';
 
@@ -220,6 +279,160 @@ function statsFor(
   return { stats: peers.global, scope: 'global' };
 }
 
+/** Traded protocols a curve can be fit or scored on: a real market cap and real TVL. */
+export function usablePeers(snapshot: Snapshot): Protocol[] {
+  return snapshot.protocols.filter(
+    (p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0,
+  );
+}
+
+/** Least-squares fit of ln(market cap) on ln(TVL), with the residual quartiles as the range. */
+function fitCurve(category: string, rows: Protocol[]): FitStats {
+  const xs = rows.map((p) => Math.log(p.tvl_usd));
+  const ys = rows.map((p) => Math.log(p.mcap_usd!));
+  const mx = xs.reduce((s, v) => s + v, 0) / xs.length;
+  const my = ys.reduce((s, v) => s + v, 0) / ys.length;
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < xs.length; i++) {
+    num += (xs[i]! - mx) * (ys[i]! - my);
+    den += (xs[i]! - mx) ** 2;
+  }
+  const slope = den > 0 ? num / den : 0;
+  const intercept = my - slope * mx;
+  const residuals = rows
+    .map((p) => Math.log(p.mcap_usd!) - (intercept + slope * Math.log(p.tvl_usd)))
+    .sort((a, b) => a - b);
+  return {
+    category,
+    peers: rows.length,
+    intercept: round4(intercept),
+    slope: round4(slope),
+    resid_low: round4(quantile(residuals, 0.25)),
+    resid_high: round4(quantile(residuals, 0.75)),
+  };
+}
+
+/** How hard a category's own level is shrunk toward the global curve: n peers count n, the prior counts this many. */
+export const LEVEL_PRIOR_PEERS = 4;
+
+/**
+ * Fitted curves: one global curve, plus a level per category. The slope
+ * is fit once on every usable peer — per-category slopes on a dozen
+ * noisy peers swing wildly, and the backtest below punishes them — while
+ * each category's intercept is the mean log gap between its peers'
+ * actual caps and the global curve, shrunk toward the global intercept
+ * with a prior worth LEVEL_PRIOR_PEERS peers.
+ */
+export function peerFits(snapshot: Snapshot): { byCategory: Map<string, FitStats>; global: FitStats } {
+  const usable = usablePeers(snapshot);
+  const global = fitCurve('All categories', usable);
+  const groups = new Map<string, Protocol[]>();
+  for (const p of usable) {
+    const key = p.category ?? 'Uncategorised';
+    const list = groups.get(key) ?? [];
+    list.push(p);
+    groups.set(key, list);
+  }
+  const byCategory = new Map<string, FitStats>();
+  for (const [category, rows] of groups) {
+    const rawLevel =
+      rows.reduce((s, p) => s + (Math.log(p.mcap_usd!) - global.slope * Math.log(p.tvl_usd)), 0) / rows.length;
+    const n = rows.length;
+    const intercept = (n * rawLevel + LEVEL_PRIOR_PEERS * global.intercept) / (n + LEVEL_PRIOR_PEERS);
+    const residuals = rows
+      .map((p) => Math.log(p.mcap_usd!) - (intercept + global.slope * Math.log(p.tvl_usd)))
+      .sort((a, b) => a - b);
+    byCategory.set(category, {
+      category,
+      peers: n,
+      intercept: round4(intercept),
+      slope: global.slope,
+      resid_low: round4(quantile(residuals, 0.25)),
+      resid_high: round4(quantile(residuals, 0.75)),
+    });
+  }
+  return { byCategory, global };
+}
+
+/** A category earns its own level at three traded peers; below that the global curve prices it. */
+export const MIN_FIT_PEERS = 3;
+
+function fitFor(
+  p: Protocol,
+  fits: { byCategory: Map<string, FitStats>; global: FitStats },
+): { fit: FitStats; scope: 'category' | 'global' } {
+  const own = p.category === null ? undefined : fits.byCategory.get(p.category);
+  if (own !== undefined && own.peers >= MIN_FIT_PEERS) return { fit: own, scope: 'category' };
+  return { fit: fits.global, scope: 'global' };
+}
+
+function predict(fit: FitStats, tvl: number): number {
+  return Math.exp(fit.intercept + fit.slope * Math.log(tvl));
+}
+
+/** FNV-1a over the slug: the backtest's coin flip, reproducible by anyone from the snapshot alone. */
+function slugHash(slug: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < slug.length; i++) {
+    h ^= slug.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+function scoreModel(name: string, preds: number[], actuals: number[]): ValidationModel {
+  const apes = preds.map((pred, i) => Math.abs(pred - actuals[i]!) / actuals[i]!).sort((a, b) => a - b);
+  const within = (factor: number): number =>
+    Math.round((preds.filter((pred, i) => pred >= actuals[i]! / factor && pred <= actuals[i]! * factor).length / preds.length) * 1000) / 10;
+  return {
+    name,
+    median_ape_pct: Math.round(quantile(apes, 0.5) * 1000) / 10,
+    within_2x_pct: within(2),
+    within_3x_pct: within(3),
+  };
+}
+
+/**
+ * The backtest: split the usable traded peers in half by slug hash, fit
+ * every candidate on the training half only, and score all of them
+ * against the held-out half's actual market caps. Deterministic: the
+ * same snapshot always produces the same report.
+ */
+export function validateModel(snapshot: Snapshot): ValidationReport {
+  const usable = usablePeers(snapshot);
+  const train = usable.filter((p) => slugHash(p.slug) % 2 === 0);
+  const test = usable.filter((p) => slugHash(p.slug) % 2 === 1);
+  const trainSnap: Snapshot = { ...snapshot, protocols: train };
+  const medians = peerStats(trainSnap);
+  const fits = peerFits(trainSnap);
+  const actuals = test.map((p) => p.mcap_usd!);
+  const run = (name: string, price: (p: Protocol) => number): ValidationModel =>
+    scoreModel(name, test.map(price), actuals);
+  const models = [
+    run('Global median multiple (one flat price)', (p) => p.tvl_usd * medians.global.median),
+    run('Category median multiple (flat, per category)', (p) => {
+      const { stats } = statsFor(p, medians);
+      return p.tvl_usd * stats.median;
+    }),
+    run('Global fitted curve (no category level)', (p) => predict(fits.global, p.tvl_usd)),
+    run('Fitted curve with category levels (this board)', (p) => {
+      const { fit } = fitFor(p, fits);
+      return predict(fit, p.tvl_usd);
+    }),
+  ];
+  return {
+    method:
+      'Split-half by slug hash (FNV-1a, even = train, odd = held out). Every model is fit on the ' +
+      'training half only and scored against the held-out half\u2019s actual market caps.',
+    usable_peers: usable.length,
+    train: train.length,
+    test: test.length,
+    global_slope: peerFits(snapshot).global.slope,
+    models,
+  };
+}
+
 function confidenceFor(stats: PeerStats): 'high' | 'medium' | 'low' {
   if (stats.peers >= 8) return 'high';
   if (stats.peers >= 4) return 'medium';
@@ -249,6 +462,8 @@ interface Scored {
   p: Protocol;
   stats: PeerStats;
   scope: 'category' | 'global';
+  fit: FitStats;
+  fitScope: 'category' | 'global';
   age: number | null;
   growthPct: number;
   growthMult: number;
@@ -257,9 +472,17 @@ interface Scored {
   implied: number;
   low: number;
   high: number;
+  medianImplied: number;
 }
 
-function score(p: Protocol, asOf: string, stats: PeerStats, scope: 'category' | 'global'): Scored {
+function score(
+  p: Protocol,
+  asOf: string,
+  stats: PeerStats,
+  scope: 'category' | 'global',
+  fit: FitStats,
+  fitScope: 'category' | 'global',
+): Scored {
   const age = ageDays(asOf, p.listed_at);
   const rawGrowth = typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : 0;
   const growthPct = Math.min(100, Math.max(-50, rawGrowth));
@@ -267,20 +490,24 @@ function score(p: Protocol, asOf: string, stats: PeerStats, scope: 'category' | 
   const ageForModel = age ?? 365;
   const maturityMult = 0.75 + (Math.min(Math.max(ageForModel, 0), 1460) / 1460) * 0.45;
   const breadthMult = 1 + 0.03 * Math.min(Math.max(p.chains.length - 1, 0), 5);
-  const apply = (multiple: number): number =>
-    Math.max(1, Math.round(p.tvl_usd * multiple * growthMult * maturityMult * breadthMult));
+  const adjust = growthMult * maturityMult * breadthMult;
+  const apply = (base: number): number => Math.max(1, Math.round(base * adjust));
+  const fitted = predict(fit, p.tvl_usd);
   return {
     p,
     stats,
     scope,
+    fit,
+    fitScope,
     age,
     growthPct,
     growthMult,
     maturityMult,
     breadthMult,
-    implied: apply(stats.median),
-    low: apply(stats.low),
-    high: apply(stats.high),
+    implied: apply(fitted),
+    low: apply(fitted * Math.exp(fit.resid_low)),
+    high: apply(fitted * Math.exp(fit.resid_high)),
+    medianImplied: apply(p.tvl_usd * stats.median),
   };
 }
 
@@ -365,6 +592,7 @@ export function farmSteps(p: Protocol, age: number | null): string[] {
 
 export function buildBoard(snapshot: Snapshot): BoardRow[] {
   const peers = peerStats(snapshot);
+  const fits = peerFits(snapshot);
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, Protocol>();
   for (const slug of snapshot.watchlist) {
@@ -379,7 +607,8 @@ export function buildBoard(snapshot: Snapshot): BoardRow[] {
 
   const scored = [...chosen.values()].map((p) => {
     const { stats, scope } = statsFor(p, peers);
-    return score(p, snapshot.as_of, stats, scope);
+    const { fit, scope: fitScope } = fitFor(p, fits);
+    return score(p, snapshot.as_of, stats, scope, fit, fitScope);
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : 1));
   const watch = new Set(snapshot.watchlist);
@@ -409,6 +638,10 @@ export function buildBoard(snapshot: Snapshot): BoardRow[] {
       peer_high: s.stats.high,
       peers: s.stats.peers,
       peer_scope: s.scope,
+      fit_intercept: s.fit.intercept,
+      fit_slope: s.fit.slope,
+      fit_scope: s.fitScope,
+      median_implied_usd: s.medianImplied,
       growth_pct: round4(s.growthPct),
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -441,6 +674,9 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const categories = [...peers.byCategory.values()]
     .filter((s) => s.peers >= 3)
     .sort((a, b) => b.peers - a.peers || (a.category < b.category ? -1 : 1));
+  const fits = [...peerFits(snapshot).byCategory.values()]
+    .filter((f) => f.peers >= MIN_FIT_PEERS)
+    .sort((a, b) => b.peers - a.peers || (a.category < b.category ? -1 : 1));
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -453,6 +689,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     pre_token_size: snapshot.protocols.filter(isPreToken).length,
     live_size: snapshot.protocols.filter((p) => !isPreToken(p)).length,
     categories,
+    fits,
+    validation: validateModel(snapshot),
     rows: board,
     live: liveRows(snapshot),
   };
