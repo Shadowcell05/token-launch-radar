@@ -13,16 +13,27 @@ a concrete farm plan for each row.
 
 ## The model
 
-Implied value = TVL × the category's peer median (market cap / TVL of the
-protocols in the same category whose token already trades; categories
-with fewer than three traded peers fall back to the global peer set),
-adjusted for 7-day TVL momentum (clamped, weight 0.35), maturity (longer
-tokenless = more credible launch) and chain breadth. The dashboard also
-shows the peer-quartile range, a per-category launch prior and a
-confidence grade from the peer count; the prior and the confidence are
-farming guidance and never move the value rank. No protocol name is
-special-cased anywhere: the same arithmetic scores every row, and the
-dashboard recomputes each value from the model's inputs in the page.
+Implied value comes from a curve fitted on the protocols whose token
+already trades: ln(market cap) = a + b × ln(TVL) — one shared slope
+(about 0.52 on this snapshot: market cap grows with roughly the square
+root of TVL, so a flat multiple systematically overprices large
+protocols) plus a level per category, shrunk toward the global curve so
+small categories stay honest. The fitted value is adjusted for 7-day TVL
+momentum (clamped, weight 0.35), maturity (longer tokenless = more
+credible launch) and chain breadth, and the range comes from the fit's
+residual quartiles.
+
+The model is measured, not asserted: the program runs a deterministic
+split-half backtest (train/test assigned by a hash of each protocol's
+slug) that fits every candidate model on one half of the traded
+protocols and scores it against the other half's actual market caps.
+The fitted curve beats both flat multiples on median error; the
+dashboard publishes the full table next to the board. The dashboard
+also shows a per-category launch prior and a confidence grade from the
+peer count; the prior and the confidence are farming guidance and never
+move the value rank. No protocol name is special-cased anywhere: the
+same arithmetic scores every row, and the dashboard recomputes each
+value from the model's inputs in the page.
 
 ## Run it
 
@@ -42,5 +53,6 @@ the scorer's own copy).
 - `lib/model.ts` — the scoring model, the farm-plan generator, the gate
   self-check.
 - `dashboard/` — the static page (board, filters, detail view, peer view).
-- `screenshots/` — the board, a protocol detail view, and a filtered
-  (watchlist, farm-priority) view, captured from the dashboard itself.
+- `screenshots/` — the board, a protocol detail view, a filtered
+  (watchlist, farm-priority) view, and the model-validation panel,
+  captured from the dashboard itself.
