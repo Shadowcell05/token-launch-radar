@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Launch Radar — pre-token protocols ranked by what their launch would be worth</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="mast">
+  <div class="mast-in">
+    <div class="brand"><span class="blip"></span> LAUNCH RADAR</div>
+    <p class="tag">Every protocol in the snapshot that still has no token, ranked by what its launch would be worth — and exactly how to farm it before it happens.</p>
+    <div class="stats" id="stats"></div>
+  </div>
+</header>
+<main>
+  <section class="model card" id="model"></section>
+  <section class="controls card">
+    <input id="q" type="search" placeholder="Search name, slug, category or chain…" aria-label="Search">
+    <select id="fcat" aria-label="Category"><option value="">All categories</option></select>
+    <select id="fchain" aria-label="Chain"><option value="">All chains</option></select>
+    <label class="chk"><input type="checkbox" id="fwatch"> Watchlist only</label>
+    <label class="chk"><input type="checkbox" id="fhiconf"> High confidence only</label>
+    <select id="sort" aria-label="Sort">
+      <option value="rank">Sort: implied value</option>
+      <option value="priority">Sort: farm priority</option>
+      <option value="tvl">Sort: TVL</option>
+      <option value="growth">Sort: 7d growth</option>
+      <option value="age">Sort: tokenless age</option>
+    </select>
+    <button id="tab-live" class="tabbtn" type="button">Already launched (peer set)</button>
+  </section>
+  <p class="count" id="count"></p>
+  <section class="card tablewrap">
+    <table id="board">
+      <thead><tr>
+        <th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th class="num">TVL</th>
+        <th class="num">7d</th><th class="num">Tokenless</th><th class="num">Implied value</th>
+        <th class="num">Range</th><th>Launch prior</th><th>Conf.</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <table id="live" hidden>
+      <thead><tr>
+        <th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th>
+        <th class="num">mcap / TVL</th><th class="num">7d</th>
+      </tr></thead>
+      <tbody id="liverows"></tbody>
+    </table>
+  </section>
+  <section class="card detail" id="detail" hidden></section>
+  <section class="card peers" id="peers"></section>
+  <footer>
+    <p>Built from one sealed DefiLlama snapshot — no live feeds, no hand-picked names. The same peer-multiple model scores every row, and this page recomputes each implied value from the model's own inputs before it prints it. A farm plan is a plan, not financial advice: positions can lose money, and most protocols on this board will never launch a token.</p>
+  </footer>
+</main>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
