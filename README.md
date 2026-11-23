@@ -24,11 +24,15 @@ credible launch) and chain breadth, and the range comes from the fit's
 residual quartiles.
 
 The model is measured, not asserted: the program runs a deterministic
-split-half backtest (train/test assigned by a hash of each protocol's
-slug) that fits every candidate model on one half of the traded
-protocols and scores it against the other half's actual market caps.
-The fitted curve beats both flat multiples on median error; the
-dashboard publishes the full table next to the board. The dashboard
+five-fold cross-validation (folds assigned by a hash of each protocol's
+slug) that fits every candidate model on four fifths of the traded
+protocols and scores it against the held-out fifth's actual market
+caps, rotating until every traded peer has been priced blind exactly
+once. The fitted curve carries the lowest median error and the best
+within-3x score of the candidates; the dashboard publishes the full
+table next to the board, and draws the model itself — every traded peer
+at its actual cap, every board row at its implied value, and the fitted
+curve through them, log-log. The dashboard
 also shows a per-category launch prior and a confidence grade from the
 peer count; the prior and the confidence are farming guidance and never
 move the value rank. No protocol name is special-cased anywhere: the
