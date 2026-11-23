@@ -61,3 +61,14 @@ footer{color:var(--faint);font-size:13px;padding:4px 2px}
 .validation th,.validation td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
 .validation td.num,.validation th.num{text-align:right;font-variant-numeric:tabular-nums}
 .validation tr.hl td{color:var(--go);font-weight:600}
+.chart svg{width:100%;height:auto;display:block}
+.chart .grid{stroke:var(--line);stroke-width:1;opacity:.55}
+.chart .ax{fill:var(--faint);font-size:11px;font-family:var(--mono)}
+.chart .fitline{stroke:var(--amber);stroke-width:2;stroke-dasharray:7 5}
+.chart .dot-live{fill:#7d8f86;opacity:.75}
+.chart .dot-board{fill:var(--go);opacity:.8}
+.chart .dot-wl{fill:var(--go);stroke:var(--amber);stroke-width:2}
+.movers{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.movers-h{font-size:11px;letter-spacing:.14em;color:var(--dim);font-family:var(--mono)}
+.chip{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:12.5px;cursor:pointer}
+.chip:hover{border-color:var(--go)}

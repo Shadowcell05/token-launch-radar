@@ -161,6 +161,7 @@
       '<div class="cell"><b>' + pct(r.change_7d) + '</b><span>TVL change, 7d</span></div>' +
       '<div class="cell"><b>' + usd(fitBase(r)) + '</b><span>fitted base (' + r.model.fit_scope + ' curve, slope ' + r.model.fit_slope.toFixed(2) + ')</span></div>' +
       '<div class="cell"><b>' + usd(r.model.median_implied_usd) + '</b><span>what a flat category median would say</span></div>' +
+      '<div class="cell"><b>$' + r.model.farm_capital_usd + '</b><span>farm plan position size (scaled to its TVL)</span></div>' +
       '<div class="cell"><b>x' + r.model.growth_multiplier.toFixed(3) + '</b><span>momentum adj.</span></div>' +
       '<div class="cell"><b>x' + r.model.maturity_multiplier.toFixed(3) + '</b><span>maturity adj. (' + ageTxt(r.age_days) + ' tokenless)</span></div>' +
       '<div class="cell"><b>x' + r.model.breadth_multiplier.toFixed(3) + '</b><span>breadth adj. (' + r.chains.length + ' chains)</span></div>' +
@@ -174,6 +175,56 @@
       '<h3>HOW TO FARM IT</h3><ol>' + r.farm_steps.map(function (s) { return '<li>' + s + '</li>'; }).join('') + '</ol>';
     $('detail').hidden = false;
     if (scroll) $('detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // The model, drawn: every traded peer at its actual market cap, every
+  // board row at its implied value, and the global fitted curve through
+  // them — log-log, straight from the same data.js numbers.
+  function renderChart() {
+    var W = 1120, H = 340, PL = 64, PR = 16, PT = 14, PB = 34;
+    var pts = [];
+    D.live.forEach(function (r) { if (r.mcap_usd) pts.push({ x: r.tvl_usd, y: r.mcap_usd, live: true }); });
+    D.rows.forEach(function (r) { pts.push({ x: r.tvl_usd, y: r.implied_value_usd, live: false, wl: r.watchlist, slug: r.slug }); });
+    var xs = pts.map(function (p) { return Math.log10(p.x); });
+    var ys = pts.map(function (p) { return Math.log10(p.y); });
+    var x0 = Math.floor(Math.min.apply(null, xs)), x1 = Math.ceil(Math.max.apply(null, xs));
+    var y0 = Math.floor(Math.min.apply(null, ys)), y1 = Math.ceil(Math.max.apply(null, ys));
+    function X(v) { return PL + ((Math.log10(v) - x0) / (x1 - x0)) * (W - PL - PR); }
+    function Y(v) { return PT + (1 - (Math.log10(v) - y0) / (y1 - y0)) * (H - PT - PB); }
+    var grid = '';
+    for (var gx = x0; gx <= x1; gx++) {
+      grid += '<line x1="' + X(Math.pow(10, gx)) + '" y1="' + PT + '" x2="' + X(Math.pow(10, gx)) + '" y2="' + (H - PB) + '" class="grid"/>' +
+        '<text x="' + X(Math.pow(10, gx)) + '" y="' + (H - PB + 18) + '" class="ax" text-anchor="middle">' + usd(Math.pow(10, gx)) + '</text>';
+    }
+    for (var gy = y0; gy <= y1; gy++) {
+      grid += '<line x1="' + PL + '" y1="' + Y(Math.pow(10, gy)) + '" x2="' + (W - PR) + '" y2="' + Y(Math.pow(10, gy)) + '" class="grid"/>' +
+        '<text x="' + (PL - 6) + '" y="' + (Y(Math.pow(10, gy)) + 4) + '" class="ax" text-anchor="end">' + usd(Math.pow(10, gy)) + '</text>';
+    }
+    var gf = D.global_fit;
+    var line = '<line x1="' + X(Math.pow(10, x0)) + '" y1="' + Y(Math.exp(gf.intercept + gf.slope * Math.log(Math.pow(10, x0)))) +
+      '" x2="' + X(Math.pow(10, x1)) + '" y2="' + Y(Math.exp(gf.intercept + gf.slope * Math.log(Math.pow(10, x1)))) + '" class="fitline"/>';
+    var dots = pts.map(function (p) {
+      return '<circle cx="' + X(p.x).toFixed(1) + '" cy="' + Y(p.y).toFixed(1) + '" r="' + (p.live ? 3 : p.wl ? 4.5 : 3.5) +
+        '" class="' + (p.live ? 'dot-live' : p.wl ? 'dot-wl' : 'dot-board') + '"/>';
+    }).join('');
+    var movers = D.rows.filter(function (r) { return r.rank <= 60 && r.change_7d !== null; })
+      .sort(function (a, b) { return (b.change_7d || 0) - (a.change_7d || 0); }).slice(0, 5);
+    $('chart').innerHTML =
+      '<h2>THE MODEL, DRAWN — TVL AGAINST VALUE, LOG-LOG</h2>' +
+      '<p>Grey dots are protocols whose token already trades, at their actual market cap. Green dots are ' +
+      'this board, at implied value; ringed dots are the watchlist. The line is the global fitted curve ' +
+      '(slope ' + gf.slope.toFixed(2) + '): value grows with roughly the square root of TVL, which is why ' +
+      'the biggest protocols sit far below any flat multiple of their TVL.</p>' +
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Scatter plot of TVL against market cap and implied value">' +
+      grid + line + dots + '</svg>' +
+      '<div class="movers"><span class="movers-h">FASTEST TVL GROWTH IN THE TOP 60</span>' +
+      movers.map(function (r) {
+        return '<button type="button" class="chip" data-slug="' + r.slug + '">' + r.name + ' <b class="pos">' +
+          pct(r.change_7d) + '</b> · ' + usd(r.implied_value_usd) + '</button>';
+      }).join('') + '</div>';
+    Array.prototype.forEach.call($('chart').querySelectorAll('.chip'), function (ch) {
+      ch.addEventListener('click', function () { showDetail(ch.getAttribute('data-slug'), true); });
+    });
   }
 
   function renderValidation() {
@@ -195,14 +246,14 @@
     $('validation').innerHTML =
       '<h2>MODEL VALIDATION — MEASURED, NOT ASSERTED</h2>' +
       '<p>' + v.method + ' ' + v.usable_peers + ' traded protocols in the snapshot carry both a ' +
-      'market cap and TVL: ' + v.train + ' train, ' + v.test + ' held out. On the full peer set the ' +
+      'market cap and TVL, and every one of them is scored. On the full peer set the ' +
       'shared slope is ' + v.global_slope.toFixed(2) + ' — market cap grows with roughly the square ' +
       'root of TVL, which is why no flat multiple prices this board.</p>' +
       '<table><thead><tr><th>Candidate model</th><th class="num">Median error</th>' +
       '<th class="num">Within 2x</th><th class="num">Within 3x</th></tr></thead><tbody>' +
       rows + '</tbody></table>' +
       '<p>The fitted curve with category levels — the model that ranks this board — carries the ' +
-      'lowest median error and ties the best within-3x score. Errors stay large in absolute terms: ' +
+      'lowest median error and the best within-3x score of the four. Errors stay large in absolute terms: ' +
       'token launches are noisy, and the board shows a range, not just a point, for exactly that reason.</p>' +
       '<h3>FITTED LEVELS BY CATEGORY</h3>' +
       '<table><thead><tr><th>Category</th><th class="num">Traded peers</th><th class="num">Level (intercept)</th>' +
@@ -238,6 +289,7 @@
   $('tab-live').addEventListener('click', function () { state.live = !state.live; applyLive(); });
 
   renderLive();
+  renderChart();
   renderValidation();
   renderPeers();
   applyLive();
