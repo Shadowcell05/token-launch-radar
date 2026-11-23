@@ -9,7 +9,8 @@
 // the curve ln(market cap) = a + b x ln(TVL) on the traded peers: one
 // shared slope, plus a level per category (three or more peers earn a
 // level, shrunk toward the global curve so small categories stay
-// honest), and prices a pre-token protocol off that curve. Three small, stated adjustments follow: seven-day TVL
+// honest), and
+// prices a pre-token protocol off that curve. Three small, stated adjustments follow: seven-day TVL
 // momentum (clamped, so one wild week cannot dominate), maturity (a
 // protocol that has run for years with no token is a more credible
 // launch candidate than a two-week-old one), and breadth (more chains, a
@@ -18,13 +19,14 @@
 // grade from the peer count are shown on the dashboard as farming
 // guidance; they never move the value ranking.
 //
-// The model is not asserted, it is measured: a deterministic split-half
-// backtest (protocols assigned to train or test by a hash of their slug,
-// so anyone can reproduce the split) fits every candidate model on one
-// half of the traded protocols and scores it against the other half's
-// actual market caps. The dashboard publishes the result next to the
-// board: the fitted curve beats the flat category median this program
-// used before, and both beat a single global multiple.
+// The model is not asserted, it is measured: a deterministic five-fold
+// cross-validation (protocols assigned to folds by a hash of their slug,
+// so anyone can reproduce the split) fits every candidate model on four
+// fifths of the traded protocols and scores it against the held-out
+// fifth's actual market caps, rotating until every peer has been scored
+// blind. The dashboard publishes the result next to the board: the
+// fitted curve beats the flat category median this program used before,
+// and both beat a single global multiple.
 //
 // Nothing here knows a protocol's name. The same arithmetic scores every
 // row, and the dashboard recomputes each value from the same inputs so a
@@ -85,12 +87,11 @@ export interface ValidationModel {
   within_3x_pct: number;
 }
 
-/** The split-half backtest, computed by this program from the snapshot itself. */
+/** The five-fold cross-validation, computed by this program from the snapshot itself. */
 export interface ValidationReport {
   method: string;
   usable_peers: number;
-  train: number;
-  test: number;
+  folds: number;
   global_slope: number;
   models: ValidationModel[];
 }
@@ -125,6 +126,7 @@ export interface BoardRow {
     fit_slope: number;
     fit_scope: 'category' | 'global';
     median_implied_usd: number;
+    farm_capital_usd: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -157,12 +159,13 @@ export interface RadarData {
   live_size: number;
   categories: PeerStats[];
   fits: FitStats[];
+  global_fit: FitStats;
   validation: ValidationReport;
   rows: BoardRow[];
   live: LiveRow[];
 }
 
-export const MODEL_VERSION = 'launch-radar-3';
+export const MODEL_VERSION = 'launch-radar-4';
 
 export const MODEL_SUMMARY =
   'Implied value comes from a curve fitted on the protocols whose token already trades: ' +
@@ -173,8 +176,9 @@ export const MODEL_SUMMARY =
   'TVL dollar overprices large protocols. The fitted value is adjusted for 7-day TVL momentum ' +
   '(clamped to -50%..+100%, weight 0.35), maturity (0.75x at listing rising to 1.20x after four ' +
   'tokenless years) and chain breadth (+3% per extra chain, at most +15%). The range uses the ' +
-  'fit\u2019s residual quartiles. A deterministic split-half backtest, published on the dashboard, ' +
-  'scores this model against the flat multiples it replaced. Launch prior and confidence are ' +
+  'fit\u2019s residual quartiles. A deterministic five-fold cross-validation, published on the ' +
+  'dashboard, scores this model against the flat multiples it replaced: every traded peer is ' +
+  'priced blind, by a model that never saw it. Launch prior and confidence are ' +
   'farming guidance only and never change the value rank. ' +
   'The board also leaves out wrapped, staked and bridged products of tokens that already trade: ' +
   'a wrapper with no ticker of its own is not a launch that has not happened yet.';
@@ -393,43 +397,63 @@ function scoreModel(name: string, preds: number[], actuals: number[]): Validatio
   };
 }
 
+/** How many folds the cross-validation rotates through. */
+export const VALIDATION_FOLDS = 5;
+
 /**
- * The backtest: split the usable traded peers in half by slug hash, fit
- * every candidate on the training half only, and score all of them
- * against the held-out half's actual market caps. Deterministic: the
- * same snapshot always produces the same report.
+ * The backtest: five-fold cross-validation over the usable traded peers.
+ * Each peer's fold is a hash of its slug, so anyone can reproduce the
+ * split from the snapshot alone. Every candidate is fit on four folds
+ * and scored against the held-out fold's actual market caps, rotating
+ * until every peer has been priced blind exactly once. Deterministic:
+ * the same snapshot always produces the same report.
  */
 export function validateModel(snapshot: Snapshot): ValidationReport {
   const usable = usablePeers(snapshot);
-  const train = usable.filter((p) => slugHash(p.slug) % 2 === 0);
-  const test = usable.filter((p) => slugHash(p.slug) % 2 === 1);
-  const trainSnap: Snapshot = { ...snapshot, protocols: train };
-  const medians = peerStats(trainSnap);
-  const fits = peerFits(trainSnap);
-  const actuals = test.map((p) => p.mcap_usd!);
-  const run = (name: string, price: (p: Protocol) => number): ValidationModel =>
-    scoreModel(name, test.map(price), actuals);
-  const models = [
-    run('Global median multiple (one flat price)', (p) => p.tvl_usd * medians.global.median),
-    run('Category median multiple (flat, per category)', (p) => {
-      const { stats } = statsFor(p, medians);
-      return p.tvl_usd * stats.median;
-    }),
-    run('Global fitted curve (no category level)', (p) => predict(fits.global, p.tvl_usd)),
-    run('Fitted curve with category levels (this board)', (p) => {
-      const { fit } = fitFor(p, fits);
-      return predict(fit, p.tvl_usd);
-    }),
+  const candidates: { name: string; price: (p: Protocol, trainSnap: Snapshot) => number }[] = [
+    {
+      name: 'Global median multiple (one flat price)',
+      price: (p, trainSnap) => p.tvl_usd * peerStats(trainSnap).global.median,
+    },
+    {
+      name: 'Category median multiple (flat, per category)',
+      price: (p, trainSnap) => {
+        const { stats } = statsFor(p, peerStats(trainSnap));
+        return p.tvl_usd * stats.median;
+      },
+    },
+    {
+      name: 'Global fitted curve (no category level)',
+      price: (p, trainSnap) => predict(peerFits(trainSnap).global, p.tvl_usd),
+    },
+    {
+      name: 'Fitted curve with category levels (this board)',
+      price: (p, trainSnap) => {
+        const { fit } = fitFor(p, peerFits(trainSnap));
+        return predict(fit, p.tvl_usd);
+      },
+    },
   ];
+  const preds = candidates.map(() => [] as number[]);
+  const actuals: number[] = [];
+  for (let fold = 0; fold < VALIDATION_FOLDS; fold++) {
+    const test = usable.filter((p) => slugHash(p.slug) % VALIDATION_FOLDS === fold);
+    const train = usable.filter((p) => slugHash(p.slug) % VALIDATION_FOLDS !== fold);
+    const trainSnap: Snapshot = { ...snapshot, protocols: train };
+    for (const p of test) {
+      actuals.push(p.mcap_usd!);
+      candidates.forEach((c, i) => preds[i]!.push(c.price(p, trainSnap)));
+    }
+  }
   return {
     method:
-      'Split-half by slug hash (FNV-1a, even = train, odd = held out). Every model is fit on the ' +
-      'training half only and scored against the held-out half\u2019s actual market caps.',
+      'Five-fold cross-validation by slug hash (FNV-1a mod 5). Every model is fit on four folds ' +
+      'only and scored against the held-out fold\u2019s actual market caps, rotating until every ' +
+      'usable peer has been priced blind exactly once.',
     usable_peers: usable.length,
-    train: train.length,
-    test: test.length,
+    folds: VALIDATION_FOLDS,
     global_slope: peerFits(snapshot).global.slope,
-    models,
+    models: candidates.map((c, i) => scoreModel(c.name, preds[i]!, actuals)),
   };
 }
 
@@ -642,6 +666,7 @@ export function buildBoard(snapshot: Snapshot): BoardRow[] {
       fit_slope: s.fit.slope,
       fit_scope: s.fitScope,
       median_implied_usd: s.medianImplied,
+      farm_capital_usd: capitalFor(s.p.tvl_usd),
       growth_pct: round4(s.growthPct),
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -690,6 +715,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     live_size: snapshot.protocols.filter((p) => !isPreToken(p)).length,
     categories,
     fits,
+    global_fit: peerFits(snapshot).global,
     validation: validateModel(snapshot),
     rows: board,
     live: liveRows(snapshot),
