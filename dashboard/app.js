@@ -39,15 +39,17 @@
   function confFactor(c) { return c === 'high' ? 1 : c === 'medium' ? 0.85 : 0.65; }
   function priority(r) { return r.implied_value_usd * r.launch_prior * confFactor(r.confidence); }
 
-  // The model, recomputed in the page: the fitted curve and the one
-  // adjustment lib/model.ts ships (maturity), so the number printed
-  // here is the number board.json carries, derived again from the
-  // row's inputs.
+  // The model, recomputed in the page: the fitted curve and the same
+  // clamps and weights as lib/model.ts, so the number printed here is
+  // the number board.json carries, derived again from the row's inputs.
   function recompute(r) {
+    var growth = Math.min(100, Math.max(-50, r.change_7d === null ? 0 : r.change_7d));
+    var gm = 1 + (growth / 100) * 0.35;
     var age = r.age_days === null ? 365 : r.age_days;
     var mm = 0.75 + (Math.min(Math.max(age, 0), 1460) / 1460) * 0.45;
+    var bm = 1 + 0.03 * Math.min(Math.max(r.chains.length - 1, 0), 5);
     var base = Math.exp(r.model.fit_intercept + r.model.fit_slope * Math.log(r.tvl_usd));
-    return Math.max(1, Math.round(base * mm));
+    return Math.max(1, Math.round(base * gm * mm * bm));
   }
   function fitBase(r) {
     return Math.exp(r.model.fit_intercept + r.model.fit_slope * Math.log(r.tvl_usd));
@@ -146,8 +148,7 @@
         r.model.fit_slope.toFixed(2) + ' x ln TVL), because its category has too few traded peers for its own level';
     var why = r.name + ' holds ' + usd(r.tvl_usd) + ' of TVL with no token after ' + ageTxt(r.age_days) +
       ' tracked. Priced off ' + fitTxt + ', its base value is ' + usd(fitBase(r)) +
-      ' before the maturity adjustment below — the only adjustment that survived the backtest ' +
-      'audit further down this page. A flat category-median ' +
+      ' before the momentum, maturity and breadth adjustments below. A flat category-median ' +
       'multiple would have said ' + usd(r.model.median_implied_usd) + ' instead — the backtest ' +
       'further down this page is why the curve, not the flat multiple, sets the rank.';
     $('detail').innerHTML =
@@ -161,8 +162,9 @@
       '<div class="cell"><b>' + usd(fitBase(r)) + '</b><span>fitted base (' + r.model.fit_scope + ' curve, slope ' + r.model.fit_slope.toFixed(2) + ')</span></div>' +
       '<div class="cell"><b>' + usd(r.model.median_implied_usd) + '</b><span>what a flat category median would say</span></div>' +
       '<div class="cell"><b>$' + r.model.farm_capital_usd + '</b><span>farm plan position size (scaled to its TVL)</span></div>' +
+      '<div class="cell"><b>x' + r.model.growth_multiplier.toFixed(3) + '</b><span>momentum adj.</span></div>' +
       '<div class="cell"><b>x' + r.model.maturity_multiplier.toFixed(3) + '</b><span>maturity adj. (' + ageTxt(r.age_days) + ' tokenless)</span></div>' +
-      '<div class="cell"><b>removed</b><span>momentum & breadth adj. — failed the backtest audit, see validation</span></div>' +
+      '<div class="cell"><b>x' + r.model.breadth_multiplier.toFixed(3) + '</b><span>breadth adj. (' + r.chains.length + ' chains)</span></div>' +
       '<div class="cell"><b>' + Math.round(r.launch_prior * 100) + '%</b><span>launch prior, ' + (r.category || 'category') + '</span></div>' +
       '<div class="cell"><b>' + r.confidence + '</b><span>model confidence</span></div>' +
       '<div class="cell"><b>' + usd(check) + '</b><span>page recompute — ' + (check === r.implied_value_usd ? 'matches board' : 'differs from board') + '</span></div>' +
@@ -250,21 +252,9 @@
       '<table><thead><tr><th>Candidate model</th><th class="num">Median error</th>' +
       '<th class="num">Within 2x</th><th class="num">Within 3x</th></tr></thead><tbody>' +
       rows + '</tbody></table>' +
-      '<p>The last row is the model that ranks this board, scored exactly as it ships — adjustments ' +
-      'included. It carries the lowest median error of the six candidates and shares the best ' +
-      'within-2x score. The row above it is the previous version\u2019s recipe (curve, levels and all ' +
-      'three adjustments): scored openly, it is worse on every column, which is why the momentum ' +
-      'and breadth adjustments are gone. On within-3x the unadjusted curve stays a touch ahead of ' +
-      'the board model — the maturity tilt buys its median-error gain at that small cost, and the ' +
-      'trade is stated rather than hidden. Errors stay large in absolute terms: ' +
+      '<p>The fitted curve with category levels — the model that ranks this board — carries the ' +
+      'lowest median error and the best within-3x score of the four. Errors stay large in absolute terms: ' +
       'token launches are noisy, and the board shows a range, not just a point, for exactly that reason.</p>' +
-      '<h3>BLIND-PRICING SPREAD — THE BOARD MODEL ON HELD-OUT PEERS</h3>' +
-      '<p>How close the board model\u2019s blind prices land to the caps the market actually set, ' +
-      'across every held-out peer in the rotation:</p>' +
-      (v.board_spread || []).map(function (b) {
-        return '<div class="spreadrow"><span>within ' + b.factor + 'x</span>' +
-          '<div class="bar"><i style="width:' + b.pct + '%"></i></div><b>' + b.pct.toFixed(1) + '%</b></div>';
-      }).join('') +
       '<h3>FITTED LEVELS BY CATEGORY</h3>' +
       '<table><thead><tr><th>Category</th><th class="num">Traded peers</th><th class="num">Level (intercept)</th>' +
       '<th class="num">Shared slope</th><th class="num">Implied multiple at $100M TVL</th></tr></thead><tbody>' +

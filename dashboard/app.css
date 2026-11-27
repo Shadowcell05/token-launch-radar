@@ -61,10 +61,6 @@ footer{color:var(--faint);font-size:13px;padding:4px 2px}
 .validation th,.validation td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
 .validation td.num,.validation th.num{text-align:right;font-variant-numeric:tabular-nums}
 .validation tr.hl td{color:var(--go);font-weight:600}
-.spreadrow{display:flex;align-items:center;gap:10px;margin:5px 0;font-size:13px}
-.spreadrow span{width:76px;font-family:var(--mono)}
-.spreadrow .bar{flex:1;width:auto;margin-top:0}
-.spreadrow b{font-family:var(--mono);font-weight:600;width:52px;text-align:right}
 .chart svg{width:100%;height:auto;display:block}
 .chart .grid{stroke:var(--line);stroke-width:1;opacity:.55}
 .chart .ax{fill:var(--faint);font-size:11px;font-family:var(--mono)}
