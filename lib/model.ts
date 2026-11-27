@@ -10,23 +10,30 @@
 // shared slope, plus a level per category (three or more peers earn a
 // level, shrunk toward the global curve so small categories stay
 // honest), and
-// prices a pre-token protocol off that curve. Three small, stated adjustments follow: seven-day TVL
-// momentum (clamped, so one wild week cannot dominate), maturity (a
-// protocol that has run for years with no token is a more credible
-// launch candidate than a two-week-old one), and breadth (more chains, a
-// slightly wider launch audience). The board ranks by the resulting
-// implied value. A separate launch prior per category and a confidence
-// grade from the peer count are shown on the dashboard as farming
-// guidance; they never move the value ranking.
+// prices a pre-token protocol off that curve. One adjustment follows:
+// maturity. A protocol that has run for years with no token is a more
+// credible launch candidate than a two-week-old one, so the fitted value
+// is scaled from 0.75x at listing to 1.20x after four tokenless years.
+// Two further adjustments an earlier version of this model shipped —
+// seven-day TVL momentum and chain breadth — were removed in this
+// version, because when the backtest below was extended to score the
+// shipped model exactly as it ranks the board, the set of three made
+// blind pricing worse, not better; maturity alone improved it. The
+// board ranks by the resulting implied value. A separate launch prior
+// per category and a confidence grade from the peer count are shown on
+// the dashboard as farming guidance; they never move the value ranking.
 //
 // The model is not asserted, it is measured: a deterministic five-fold
 // cross-validation (protocols assigned to folds by a hash of their slug,
 // so anyone can reproduce the split) fits every candidate model on four
 // fifths of the traded protocols and scores it against the held-out
 // fifth's actual market caps, rotating until every peer has been scored
-// blind. The dashboard publishes the result next to the board: the
-// fitted curve beats the flat category median this program used before,
-// and both beat a single global multiple.
+// blind. The candidate list is an audit, not a beauty contest: it
+// includes the flat multiples the curve replaced, the curve with no
+// adjustments, the previous version's full adjustment set, and the
+// model that actually ranks this board — measured exactly as shipped,
+// adjustments included. The dashboard publishes the result next to the
+// board.
 //
 // Nothing here knows a protocol's name. The same arithmetic scores every
 // row, and the dashboard recomputes each value from the same inputs so a
@@ -87,6 +94,12 @@ export interface ValidationModel {
   within_3x_pct: number;
 }
 
+/** One band of the board model's blind-pricing spread: the share of held-out peers priced within a factor of their actual cap. */
+export interface SpreadBand {
+  factor: number;
+  pct: number;
+}
+
 /** The five-fold cross-validation, computed by this program from the snapshot itself. */
 export interface ValidationReport {
   method: string;
@@ -94,6 +107,7 @@ export interface ValidationReport {
   folds: number;
   global_slope: number;
   models: ValidationModel[];
+  board_spread: SpreadBand[];
 }
 
 export interface BoardRow {
@@ -127,10 +141,7 @@ export interface BoardRow {
     fit_scope: 'category' | 'global';
     median_implied_usd: number;
     farm_capital_usd: number;
-    growth_pct: number;
-    growth_multiplier: number;
     maturity_multiplier: number;
-    breadth_multiplier: number;
   };
   farm_steps: string[];
 }
@@ -165,7 +176,7 @@ export interface RadarData {
   live: LiveRow[];
 }
 
-export const MODEL_VERSION = 'launch-radar-4';
+export const MODEL_VERSION = 'launch-radar-5';
 
 export const MODEL_SUMMARY =
   'Implied value comes from a curve fitted on the protocols whose token already trades: ' +
@@ -173,11 +184,14 @@ export const MODEL_SUMMARY =
   'traded peers earn a level, shrunk toward the global curve; otherwise the global curve ' +
   'prices it). A flat multiple is not ' +
   'used: on this snapshot market cap grows like TVL to about the power 0.5, so a flat price per ' +
-  'TVL dollar overprices large protocols. The fitted value is adjusted for 7-day TVL momentum ' +
-  '(clamped to -50%..+100%, weight 0.35), maturity (0.75x at listing rising to 1.20x after four ' +
-  'tokenless years) and chain breadth (+3% per extra chain, at most +15%). The range uses the ' +
+  'TVL dollar overprices large protocols. The fitted value carries one adjustment: maturity ' +
+  '(0.75x at listing rising to 1.20x after four tokenless years). An earlier version of this ' +
+  'model also adjusted for 7-day TVL momentum and chain breadth; both were removed after the ' +
+  'backtest was extended to score the shipped model exactly as it ranks the board — as a set ' +
+  'they made blind pricing worse, while maturity alone improved it. The range uses the ' +
   'fit\u2019s residual quartiles. A deterministic five-fold cross-validation, published on the ' +
-  'dashboard, scores this model against the flat multiples it replaced: every traded peer is ' +
+  'dashboard, scores this exact model — adjustments included — against the flat multiples it ' +
+  'replaced and against its own earlier recipes: every traded peer is ' +
   'priced blind, by a model that never saw it. Launch prior and confidence are ' +
   'farming guidance only and never change the value rank. ' +
   'The board also leaves out wrapped, staked and bridged products of tokens that already trade: ' +
@@ -400,6 +414,27 @@ function scoreModel(name: string, preds: number[], actuals: number[]): Validatio
 /** How many folds the cross-validation rotates through. */
 export const VALIDATION_FOLDS = 5;
 
+/** The maturity scale: 0.75x at listing, rising linearly to 1.20x after four tokenless years. */
+export function maturityMultiplier(age: number | null): number {
+  const ageForModel = age ?? 365;
+  return 0.75 + (Math.min(Math.max(ageForModel, 0), 1460) / 1460) * 0.45;
+}
+
+/**
+ * The previous version's full adjustment set, kept only as a backtest
+ * candidate: 7-day TVL momentum (clamped to -50%..+100%, weight 0.35),
+ * maturity, and chain breadth (+3% per extra chain, at most +15%). The
+ * shipped model no longer applies the momentum or breadth terms — the
+ * audit in validateModel is where that verdict comes from.
+ */
+function legacyAdjust(p: Protocol, asOf: string): number {
+  const rawGrowth = typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : 0;
+  const growthPct = Math.min(100, Math.max(-50, rawGrowth));
+  const growthMult = 1 + (growthPct / 100) * 0.35;
+  const breadthMult = 1 + 0.03 * Math.min(Math.max(p.chains.length - 1, 0), 5);
+  return growthMult * maturityMultiplier(ageDays(asOf, p.listed_at)) * breadthMult;
+}
+
 /**
  * The backtest: five-fold cross-validation over the usable traded peers.
  * Each peer's fold is a hash of its slug, so anyone can reproduce the
@@ -407,9 +442,20 @@ export const VALIDATION_FOLDS = 5;
  * and scored against the held-out fold's actual market caps, rotating
  * until every peer has been priced blind exactly once. Deterministic:
  * the same snapshot always produces the same report.
+ *
+ * The candidate list doubles as the model's adjustment audit. The last
+ * candidate is the shipped board model, priced exactly as the board
+ * prices — fitted curve, category level, maturity adjustment and all.
+ * The candidate before it is the previous version's recipe (curve,
+ * levels and all three adjustments): it is in the table so the reader
+ * can see what removing momentum and breadth bought, in the open.
  */
 export function validateModel(snapshot: Snapshot): ValidationReport {
   const usable = usablePeers(snapshot);
+  const curveOnly = (p: Protocol, trainSnap: Snapshot): number => {
+    const { fit } = fitFor(p, peerFits(trainSnap));
+    return predict(fit, p.tvl_usd);
+  };
   const candidates: { name: string; price: (p: Protocol, trainSnap: Snapshot) => number }[] = [
     {
       name: 'Global median multiple (one flat price)',
@@ -427,11 +473,16 @@ export function validateModel(snapshot: Snapshot): ValidationReport {
       price: (p, trainSnap) => predict(peerFits(trainSnap).global, p.tvl_usd),
     },
     {
-      name: 'Fitted curve with category levels (this board)',
-      price: (p, trainSnap) => {
-        const { fit } = fitFor(p, peerFits(trainSnap));
-        return predict(fit, p.tvl_usd);
-      },
+      name: 'Fitted curve with category levels (no adjustments)',
+      price: curveOnly,
+    },
+    {
+      name: 'Curve + levels + momentum, maturity & breadth (previous recipe)',
+      price: (p, trainSnap) => curveOnly(p, trainSnap) * legacyAdjust(p, trainSnap.as_of),
+    },
+    {
+      name: 'Curve + levels + maturity (this board)',
+      price: (p, trainSnap) => curveOnly(p, trainSnap) * maturityMultiplier(ageDays(trainSnap.as_of, p.listed_at)),
     },
   ];
   const preds = candidates.map(() => [] as number[]);
@@ -445,15 +496,28 @@ export function validateModel(snapshot: Snapshot): ValidationReport {
       candidates.forEach((c, i) => preds[i]!.push(c.price(p, trainSnap)));
     }
   }
+  const boardPreds = preds[preds.length - 1]!;
+  const spread = [1.5, 2, 3, 5].map((factor) => ({
+    factor,
+    pct:
+      Math.round(
+        (boardPreds.filter((pred, i) => pred >= actuals[i]! / factor && pred <= actuals[i]! * factor).length /
+          boardPreds.length) *
+          1000,
+      ) / 10,
+  }));
   return {
     method:
       'Five-fold cross-validation by slug hash (FNV-1a mod 5). Every model is fit on four folds ' +
       'only and scored against the held-out fold\u2019s actual market caps, rotating until every ' +
-      'usable peer has been priced blind exactly once.',
+      'usable peer has been priced blind exactly once. The board model is scored exactly as it ' +
+      'ships \u2014 adjustments included \u2014 and the previous version\u2019s full adjustment set is ' +
+      'scored beside it, so every adjustment this model keeps or drops has a published verdict.',
     usable_peers: usable.length,
     folds: VALIDATION_FOLDS,
     global_slope: peerFits(snapshot).global.slope,
     models: candidates.map((c, i) => scoreModel(c.name, preds[i]!, actuals)),
+    board_spread: spread,
   };
 }
 
@@ -489,10 +553,7 @@ interface Scored {
   fit: FitStats;
   fitScope: 'category' | 'global';
   age: number | null;
-  growthPct: number;
-  growthMult: number;
   maturityMult: number;
-  breadthMult: number;
   implied: number;
   low: number;
   high: number;
@@ -508,14 +569,8 @@ function score(
   fitScope: 'category' | 'global',
 ): Scored {
   const age = ageDays(asOf, p.listed_at);
-  const rawGrowth = typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : 0;
-  const growthPct = Math.min(100, Math.max(-50, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * 0.35;
-  const ageForModel = age ?? 365;
-  const maturityMult = 0.75 + (Math.min(Math.max(ageForModel, 0), 1460) / 1460) * 0.45;
-  const breadthMult = 1 + 0.03 * Math.min(Math.max(p.chains.length - 1, 0), 5);
-  const adjust = growthMult * maturityMult * breadthMult;
-  const apply = (base: number): number => Math.max(1, Math.round(base * adjust));
+  const maturityMult = maturityMultiplier(age);
+  const apply = (base: number): number => Math.max(1, Math.round(base * maturityMult));
   const fitted = predict(fit, p.tvl_usd);
   return {
     p,
@@ -524,10 +579,7 @@ function score(
     fit,
     fitScope,
     age,
-    growthPct,
-    growthMult,
     maturityMult,
-    breadthMult,
     implied: apply(fitted),
     low: apply(fitted * Math.exp(fit.resid_low)),
     high: apply(fitted * Math.exp(fit.resid_high)),
@@ -589,10 +641,11 @@ function coreAction(p: Protocol, capital: number, chain: string): string {
 }
 
 /**
- * Six farm steps for one protocol. Every step names its cost and its time,
- * and every number in the plan comes from the protocol's own snapshot
- * record (TVL band, age, chains, category) — no invented APY, points or
- * reward rates.
+ * Eight farm steps for one protocol. Every step names its cost and its
+ * time, and every number in the plan comes from the protocol's own
+ * snapshot record (TVL band, age, chains, category) — no invented APY,
+ * points or reward rates. The last step is the exit rule, set on day
+ * one: most farm losses come from positions nobody decided how to end.
  */
 export function farmSteps(p: Protocol, age: number | null): string[] {
   const chain = firstChain(p);
@@ -610,6 +663,7 @@ export function farmSteps(p: Protocol, age: number | null): string[] {
       : `Stay on ${chain} only: ${p.name} records all of its TVL there, so splitting the position across chains would add cost without adding signal. Cost: nothing extra. Time: 5 minutes to confirm.`,
     `Check ${p.name}'s own site and governance forum once a month for a points, rewards or token announcement, and claim only from links the protocol itself publishes. Cost: nothing to check, and never pay a fee to claim. Time: 10 minutes a month.`,
     `Log the wallet address, every transaction hash and the dates in a farm journal, so the position can be repeated, topped up or unwound without guesswork. Cost: nothing. Time: 5 minutes.`,
+    `Set the exit rule before you need it: withdraw if ${p.name} sunsets the product, stops reporting TVL, or announces a snapshot date you cannot hold until; if a token does launch, claim only through the protocol's own announcement and make the hold-or-sell decision the same week, not by drift. Cost: gas to withdraw, about the same as the deposit. Time: 15 minutes.`,
   ];
   return steps.map((s) => (s.length > 600 ? `${s.slice(0, 596)}...` : s));
 }
@@ -667,10 +721,7 @@ export function buildBoard(snapshot: Snapshot): BoardRow[] {
       fit_scope: s.fitScope,
       median_implied_usd: s.medianImplied,
       farm_capital_usd: capitalFor(s.p.tvl_usd),
-      growth_pct: round4(s.growthPct),
-      growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
-      breadth_multiplier: round4(s.breadthMult),
     },
     farm_steps: farmSteps(s.p, s.age),
   }));
