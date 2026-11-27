@@ -18,21 +18,29 @@ already trades: ln(market cap) = a + b × ln(TVL) — one shared slope
 (about 0.52 on this snapshot: market cap grows with roughly the square
 root of TVL, so a flat multiple systematically overprices large
 protocols) plus a level per category, shrunk toward the global curve so
-small categories stay honest. The fitted value is adjusted for 7-day TVL
-momentum (clamped, weight 0.35), maturity (longer tokenless = more
-credible launch) and chain breadth, and the range comes from the fit's
-residual quartiles.
+small categories stay honest. The fitted value carries one adjustment —
+maturity (0.75x at listing rising to 1.20x after four tokenless years:
+longer tokenless = a more credible launch candidate) — and the range
+comes from the fit's residual quartiles.
 
 The model is measured, not asserted: the program runs a deterministic
 five-fold cross-validation (folds assigned by a hash of each protocol's
 slug) that fits every candidate model on four fifths of the traded
 protocols and scores it against the held-out fifth's actual market
 caps, rotating until every traded peer has been priced blind exactly
-once. The fitted curve carries the lowest median error and the best
-within-3x score of the candidates; the dashboard publishes the full
-table next to the board, and draws the model itself — every traded peer
-at its actual cap, every board row at its implied value, and the fitted
-curve through them, log-log. The dashboard
+once. The candidate table is an audit: it scores the board model
+exactly as it ships (adjustment included), the unadjusted curve, the
+flat multiples the curve replaced, and the previous version's full
+adjustment set (momentum + maturity + breadth). That audit is why this
+version is simpler than the last: scored openly, the full set priced
+blind *worse* on every column (87.8% median error against 86.0% for
+the bare curve), while maturity alone improved the curve to 84.9% —
+the lowest median error of the six candidates. Momentum and breadth
+were removed; nothing in this model is kept on intuition. The
+dashboard publishes the full table and the board model's blind-pricing
+spread next to the board, and draws the model itself — every traded
+peer at its actual cap, every board row at its implied value, and the
+fitted curve through them, log-log. The dashboard
 also shows a per-category launch prior and a confidence grade from the
 peer count; the prior and the confidence are farming guidance and never
 move the value rank. No protocol name is special-cased anywhere: the
